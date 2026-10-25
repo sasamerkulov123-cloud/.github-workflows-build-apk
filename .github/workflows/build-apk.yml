@@ -1,0 +1,96 @@
+name: Build Lumen Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lumen-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python and Node for source checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK components
+        uses: android-actions/setup-android@v4
+
+      - name: Accept SDK licenses and install compile SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Select project folder
+        id: project
+        shell: bash
+        run: |
+          if [[ -f settings.gradle && -d app/src/main/assets ]]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [[ -f Lumen_Mayak_Android_Ready.zip ]]; then
+            mkdir -p .build-project
+            unzip -q Lumen_Mayak_Android_Ready.zip -d .build-project
+            PROJECT_DIR="$(find .build-project -name settings.gradle -print -quit | xargs dirname)"
+            test -n "$PROJECT_DIR"
+            echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not find settings.gradle or Lumen_Mayak_Android_Ready.zip at repository root." >&2
+            exit 1
+          fi
+
+      - name: Verify project source
+        run: python "${{ steps.project.outputs.dir }}/tools/verify_project.py"
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK signature and archive
+        shell: bash
+        run: |
+          APK="${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
+          APKSIGNER="$SDK_ROOT/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose "$APK"
+          mkdir -p verified
+          cp "$APK" verified/Lumen-Mayak-0.8.0-alpha-debug.apk
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lumen-Mayak-0.8.0-alpha-APK
+          path: verified/Lumen-Mayak-0.8.0-alpha-debug.apk
+          if-no-files-found: error
+          retention-days: 30
